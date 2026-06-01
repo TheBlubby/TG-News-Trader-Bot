@@ -1,0 +1,6 @@
+{
+  "name": "TG News Trader Bot",
+  "description": "Dashboard for configuring a Telegram news parsing and MEXC trading bot.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

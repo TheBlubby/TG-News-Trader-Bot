@@ -2,6 +2,7 @@ import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import axios from "axios";
+import * as cheerio from "cheerio";
 import crypto from "crypto";
 
 // In-memory store for settings and logs
@@ -9,15 +10,16 @@ import crypto from "crypto";
 let appSettings = {
   mexcApiKey: "",
   mexcApiSecret: "",
-  telegramTargetChannel: "",
+  telegramTargetChannel: "durov", // E.g., durov
   symbol: "TON_USDT",
-  positionSide: "LONG", // Hardcoded per user request
-  positionSizeQuote: "50", // Amount in USDT
+  positionSide: "LONG", 
+  positionSizeQuote: "50", 
   leverage: "10",
   takeProfitPrc: "15",
   stopLossPrc: "5",
   keywords: ["ton", "the open network", "durov", "partnership", "integration"],
-  isRunning: false
+  isRunning: false,
+  lastSeenPostId: ""
 };
 
 const systemLogs: string[] = [
@@ -118,54 +120,62 @@ async function startServer() {
     res.json({ isRunning: appSettings.isRunning });
   });
 
-  // TELEGRAM WEBHOOK ENDPOINT
-  // To test: send a POST request with Telegram Update JSON format to /api/webhook/telegram
-  app.post("/api/webhook/telegram", (req, res) => {
-    // Acknowledge Telegram immediately to prevent retries
-    res.sendStatus(200);
-
-    if (!appSettings.isRunning) return;
+  // PUBLIC CHANNEL POLLING ENDPOINT (Vercel Cron friendly)
+  // Hit this endpoint periodically via an external cron job or manual trigger
+  app.post("/api/poll", async (req, res) => {
+    if (!appSettings.isRunning) {
+      return res.json({ status: "skipped", reason: "Bot is offline" });
+    }
+    
+    let channel = appSettings.telegramTargetChannel.trim();
+    if (!channel) return res.json({ status: "error", error: "No channel set" });
+    
+    // Clean up channel input to extract just the username
+    channel = channel.replace("https://t.me/", "").replace("@", "").split('/')[0];
 
     try {
-      const update = req.body;
-      let text = "";
-      let chatId = "";
+      addLog(`Polling t.me/s/${channel}...`);
+      const response = await axios.get(`https://t.me/s/${channel}`, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+      });
 
-      // Extract message text from channels or groups
-      if (update.channel_post && update.channel_post.text) {
-        text = update.channel_post.text.toLowerCase();
-        chatId = update.channel_post.chat.id.toString();
-      } else if (update.message && update.message.text) {
-        text = update.message.text.toLowerCase();
-        chatId = update.message.chat.id.toString();
+      const $ = cheerio.load(response.data);
+      const lastPost = $('.tgme_widget_message').last();
+      const postId = lastPost.attr('data-post');
+      let text = lastPost.find('.tgme_widget_message_text').text();
+
+      if (!postId) {
+        return res.json({ status: "error", error: "Could not find any posts on the channel" });
       }
 
-      if (text) {
-        addLog(`Analyzing new message: "${text.substring(0, 50)}..."`);
-        
-        // Match target channel if configured
-        if (appSettings.telegramTargetChannel && chatId !== appSettings.telegramTargetChannel) {
-             // Ignoring log for other channels so we don't spam
-             return;
-        }
+      if (postId === appSettings.lastSeenPostId) {
+        return res.json({ status: "ok", action: "none", message: "No new posts detected" });
+      }
 
-        // Check keywords
-        const isMatch = appSettings.keywords.some(keyword => text.includes(keyword.toLowerCase()));
+      // New post detected!
+      appSettings.lastSeenPostId = postId;
+      text = text.toLowerCase();
+      
+      addLog(`New post detected [${postId}]: "${text.substring(0, 50)}..."`);
+
+      // Check keywords
+      const isMatch = appSettings.keywords.some(keyword => text.includes(keyword.toLowerCase()));
+      
+      if (isMatch) {
+        addLog("🟢 KEYWORD MATCH DETECTED! Triggering Trading Logic.");
+        executeMexcTrade();
         
-        if (isMatch) {
-          addLog("🟢 KEYWORD MATCH DETECTED! Triggering Trading Logic.");
-          // Execute the trade (LONG on TON)
-          executeMexcTrade();
-          
-          // Disable bot to avoid double buying on subsequent matched messages
-          appSettings.isRunning = false;
-          addLog("Bot stopped to prevent double entry.");
-        } else {
-            addLog("No keywords matched. Ignoring.");
-        }
+        // Disable bot to avoid false duplicates on same news
+        appSettings.isRunning = false;
+        addLog("Bot stopped to prevent duplicate executions.");
+        return res.json({ status: "ok", action: "trade_executed" });
+      } else {
+        addLog("No keywords matched. Ignoring.");
+        return res.json({ status: "ok", action: "ignored_no_match" });
       }
     } catch (e: any) {
-      addLog(`Webhook error: ${e.message}`);
+      addLog(`Polling error: ${e.message}`);
+      res.status(500).json({ status: "error", error: e.message });
     }
   });
 

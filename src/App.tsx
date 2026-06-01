@@ -188,19 +188,20 @@ export default function App() {
             </div>
 
             <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
-              <h2 className="text-lg font-medium mb-4 flex items-center gap-2"><Activity size={20} className="text-slate-400"/> Telegram Webhook Setup (Vercel)</h2>
+              <h2 className="text-lg font-medium mb-4 flex items-center gap-2"><Activity size={20} className="text-slate-400"/> Telegram Channel Poller</h2>
               <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-4 flex gap-3 text-amber-800 text-sm">
                 <AlertCircle size={20} className="text-amber-600 shrink-0" />
                 <div className="space-y-1">
-                  <p className="font-semibold">Webhook URL Required for Vercel</p>
-                  <p>In a serverless Vercel environment, you must use a Telegram Bot. Register a bot with @BotFather and set its webhook to point to <code>https://your-vercel-app.vercel.app/api/webhook/telegram</code>.</p>
+                  <p className="font-semibold">Vercel Polling Support</p>
+                  <p>You cannot use a bot socket to listen to a channel you don't own. Instead, this uses a <strong>Scraper Poller</strong> on the public Telegram preview link (<code className="bg-amber-100 px-1 rounded">t.me/s/username</code>).</p>
+                  <p className="mt-2 text-xs"><strong>Automation:</strong> To run continuously on Vercel, set up <a href="https://cron-job.org" className="underline" target="_blank" rel="noreferrer">cron-job.org</a> to POST to <code>https://your-vercel-app.vercel.app/api/poll</code> every minute.</p>
                 </div>
               </div>
               <div className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Target Channel ID (to monitor)</label>
-                  <input type="text" value={settings.telegramTargetChannel} onChange={e => setSettings({...settings, telegramTargetChannel: e.target.value})} className="w-full px-3 py-2 border border-slate-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm" placeholder="-1001234567890" />
-                  <p className="text-xs text-slate-500 mt-1">The bot must be added to this channel as an admin to receive messages via webhooks.</p>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Target Channel Username (e.g. durov)</label>
+                  <input type="text" value={settings.telegramTargetChannel} onChange={e => setSettings({...settings, telegramTargetChannel: e.target.value})} className="w-full px-3 py-2 border border-slate-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm" placeholder="durov" />
+                  <p className="text-xs text-slate-500 mt-1">Provide public channel link or username. The scraper will read its latest public messages.</p>
                 </div>
               </div>
             </div>
@@ -218,9 +219,14 @@ export default function App() {
             <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
               <div className="flex justify-between items-start mb-4">
                  <h2 className="text-lg font-medium">Trading Parameters: TON/USDT LONG</h2>
-                 <button onClick={executeTestBuy} className="flex items-center gap-1 text-xs font-semibold bg-amber-100 text-amber-700 hover:bg-amber-200 px-3 py-1.5 rounded-md transition-colors">
-                   <Zap size={14} /> Test Order
-                 </button>
+                 <div className="flex items-center gap-2">
+                   <button onClick={async () => { await fetch('/api/poll', {method: 'POST'}); setActiveTab('logs'); }} className="flex items-center gap-1 text-xs font-semibold bg-blue-100 text-blue-700 hover:bg-blue-200 px-3 py-1.5 rounded-md transition-colors">
+                     <Activity size={14} /> Manual Poll
+                   </button>
+                   <button onClick={executeTestBuy} className="flex items-center gap-1 text-xs font-semibold bg-amber-100 text-amber-700 hover:bg-amber-200 px-3 py-1.5 rounded-md transition-colors">
+                     <Zap size={14} /> Test Order
+                   </button>
+                 </div>
               </div>
               <div className="grid grid-cols-2 gap-6">
                 <div>

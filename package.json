@@ -7,6 +7,8 @@
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
+    "generate-session": "tsx generate-session.ts",
+    "generate-session-qr": "tsx generate-session-qr.ts",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
@@ -14,15 +16,20 @@
   "dependencies": {
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.1.14",
+    "@types/qrcode-terminal": "^0.12.2",
     "@vitejs/plugin-react": "^5.0.4",
     "axios": "^1.16.1",
+    "ccxt": "^4.5.56",
     "cheerio": "^1.2.0",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
+    "input": "^1.0.1",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
+    "qrcode-terminal": "^0.12.0",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
+    "telegram": "^2.26.22",
     "vite": "^6.2.3"
   },
   "devDependencies": {

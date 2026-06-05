@@ -95,23 +95,28 @@ async function sendTelegramNotification(message: string, parseMode: string = "")
   if (!appSettings.telegramBotToken || !appSettings.telegramChatId) return;
   try {
     const url = `https://api.telegram.org/bot${appSettings.telegramBotToken}/sendMessage`;
-    const payload: any = {
-      chat_id: appSettings.telegramChatId,
-      text: message
-    };
-    if (parseMode) {
-      payload.parse_mode = parseMode;
-    }
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
+    const chatIds = appSettings.telegramChatId.split(',').map(id => id.trim()).filter(id => id);
     
-    if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
-      console.error("Telegram API Error:", data);
-      addLog(`❌ Telegram Bot Error: ${data.description || response.statusText}`);
+    for (const chatId of chatIds) {
+      const payload: any = {
+        chat_id: chatId,
+        text: message
+      };
+      if (parseMode) {
+        payload.parse_mode = parseMode;
+      }
+      
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        console.error(`Telegram API Error for chat ${chatId}:`, data);
+        addLog(`❌ Telegram Bot Error for ${chatId}: ${data.description || response.statusText}`);
+      }
     }
   } catch (error: any) {
     console.error("Telegram notification error:", error);

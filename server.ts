@@ -7,15 +7,20 @@ import { StringSession } from "telegram/sessions/index.js";
 import { NewMessage } from "telegram/events/index.js";
 import crypto from "crypto";
 import ccxt from "ccxt";
+import fs from "fs";
 
-// In-memory store for settings and logs
-let appSettings = {
+const SETTINGS_FILE = path.join(process.cwd(), "settings.json");
+
+// Default settings structure
+const defaultSettings = {
   mexcApiKey: "",
   mexcApiSecret: "",
   telegramTargetChannel: "durov", // E.g., durov
   tgApiId: "",
   tgApiHash: "",
   tgSessionString: "",
+  telegramBotToken: "",
+  telegramChatId: "",
   symbol: "TON_USDT",
   positionSide: "LONG", 
   positionSizeQuote: "50", 
@@ -27,15 +32,58 @@ let appSettings = {
   stopLossPrc: "5",
   keywords: ["ton", "the open network", "durov", "partnership", "integration"],
   isRunning: false,
-  isLiveTradingEnabled: false,
+  mexcAccounts: [
+    {
+      id: "default-account",
+      name: "Main Account",
+      apiKey: "",
+      apiSecret: "",
+      useGlobalStrategy: true,
+      positionSizeQuote: "50", 
+      leverage: "10",
+      marginMode: "cross",
+      enableTakeProfit: true,
+      takeProfitPrc: "15",
+      enableStopLoss: true,
+      stopLossPrc: "5",
+    }
+  ]
 };
+
+// In-memory store for settings and logs
+let appSettings = { ...defaultSettings };
+
+// Load settings from file if exists
+try {
+  if (fs.existsSync(SETTINGS_FILE)) {
+    const fileData = fs.readFileSync(SETTINGS_FILE, "utf-8");
+    const loadedSettings = JSON.parse(fileData);
+    appSettings = { ...defaultSettings, ...loadedSettings };
+  }
+} catch (e) {
+  console.error("Failed to load settings file:", e);
+}
+
+function saveSettings() {
+  try {
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(appSettings, null, 2), "utf-8");
+  } catch (e) {
+    console.error("Failed to save settings file:", e);
+  }
+}
 
 // Global error handler to prevent crashes from unhandled promise rejections (like GramJS async throws)
 process.on('unhandledRejection', (reason: any, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  if (reason && reason.errorMessage === 'AUTH_KEY_UNREGISTERED') {
+  const msg = reason?.message || reason?.errorMessage || String(reason);
+  if (msg.includes('AUTH_KEY_UNREGISTERED')) {
       addLog('❌ FATAL ERROR: Telegram Session String is INVALID or REVOKED. Please generate a new one and update settings.');
       appSettings.isRunning = false;
+      saveSettings();
+  } else if (msg.includes('Cannot send requests while disconnected') || msg.includes('TIMEOUT')) {
+      // Ignore background GramJS disconnection errors
+      console.log(`[Background Network Error]: ${msg}`);
+  } else {
+      console.error('Unhandled Rejection at:', promise, 'reason:', reason);
   }
 });
 
@@ -43,11 +91,40 @@ const systemLogs: string[] = [
   `[${new Date().toISOString()}] System initialized.`
 ];
 
-function addLog(msg: string) {
+async function sendTelegramNotification(message: string, parseMode: string = "") {
+  if (!appSettings.telegramBotToken || !appSettings.telegramChatId) return;
+  try {
+    const url = `https://api.telegram.org/bot${appSettings.telegramBotToken}/sendMessage`;
+    const payload: any = {
+      chat_id: appSettings.telegramChatId,
+      text: message
+    };
+    if (parseMode) {
+      payload.parse_mode = parseMode;
+    }
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      console.error("Telegram API Error:", data);
+      addLog(`❌ Telegram Bot Error: ${data.description || response.statusText}`);
+    }
+  } catch (error: any) {
+    console.error("Telegram notification error:", error);
+    addLog(`❌ Telegram Network Error: ${error.message}`);
+  }
+}
+
+function addLog(msg: string, notify: boolean = false) {
   const timestamp = new Date().toISOString();
   systemLogs.unshift(`[${timestamp}] ${msg}`);
   if (systemLogs.length > 100) systemLogs.pop();
   console.log(`[LOG] ${msg}`);
+  if (notify) sendTelegramNotification(`[LOG] ${msg}`);
 }
 
 let tgClient: TelegramClient | null = null;
@@ -56,6 +133,7 @@ async function startTgClient() {
   if (!appSettings.tgApiId || !appSettings.tgApiHash || !appSettings.tgSessionString) {
     addLog("ERROR: Telegram API ID, Hash, or Session String missing. Cannot start fast listener.");
     appSettings.isRunning = false;
+    saveSettings();
     return;
   }
 
@@ -74,10 +152,14 @@ async function startTgClient() {
       systemLangCode: "en",
     });
 
-    await tgClient.connect();
+    const tgPromise = tgClient.connect();
+    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Telegram connection timed out (bad session/network)")), 15000));
+    
+    await Promise.race([tgPromise, timeoutPromise]);
     addLog("✅ Connected to Telegram MTProto instantly.");
 
     tgClient.addEventHandler(async (event: any) => {
+      const receiveTimeMs = Date.now();
       const message = event.message;
       let text = message.message || "";
       if (!text) return;
@@ -87,11 +169,12 @@ async function startTgClient() {
       
       const matchedKeyword = appSettings.keywords.find(keyword => text.includes(keyword.toLowerCase()));
       if (matchedKeyword) {
-         addLog(`🟢 KEYWORD MATCH DETECTED OVER SOCKET! Triggering Trading Logic. (Matched phrase: "${matchedKeyword}")`);
-         executeMexcTrade();
+         addLog(`🟢 KEYWORD MATCH DETECTED OVER SOCKET! Triggering Trading Logic. (Matched phrase: "${matchedKeyword}")`, false);
+         executeMexcTrade({ matchedKeyword, messageTimestampMs: receiveTimeMs });
          
          // Disable to avoid double
          appSettings.isRunning = false;
+         saveSettings();
          await stopTgClient();
          addLog("Bot stopped and disconnected to prevent duplicate executions.");
       }
@@ -102,28 +185,33 @@ async function startTgClient() {
   } catch (err: any) {
     addLog(`Telegram Client Error: ${err.message}`);
     appSettings.isRunning = false;
+    saveSettings();
   }
 }
 
 async function stopTgClient() {
   if (tgClient) {
-    await tgClient.disconnect();
+    try {
+      await tgClient.disconnect();
+    } catch (err: any) {
+      console.log(`Telegram Client disconnect error: ${err.message}`);
+    }
     tgClient = null;
     addLog("Telegram real-time listener stopped.");
   }
 }
 
 // Helper to interact with MEXC Futures API v1 through CCXT
-async function executeMexcTrade() {
-  if (!appSettings.mexcApiKey || !appSettings.mexcApiSecret) {
-    addLog("ERROR: MEXC API keys not configured.");
+async function executeTradeForAccount(account: any, eventDetails?: { matchedKeyword: string, messageTimestampMs: number }) {
+  if (!account.apiKey || !account.apiSecret) {
+    addLog(`ERROR: MEXC API keys not configured for account ${account.name}.`);
     return;
   }
 
   try {
     const exchange = new ccxt.mexc({
-      apiKey: appSettings.mexcApiKey,
-      secret: appSettings.mexcApiSecret,
+      apiKey: account.apiKey,
+      secret: account.apiSecret,
       options: {
         defaultType: 'swap',
       },
@@ -155,24 +243,23 @@ async function executeMexcTrade() {
       }
     }
     
-    const leverage = parseInt(appSettings.leverage) || 5;
+    // Use account specific settings if useGlobalStrategy is false
+    const leverageSetting = account.useGlobalStrategy ? appSettings.leverage : account.leverage;
+    const marginModeSetting = account.useGlobalStrategy ? appSettings.marginMode : account.marginMode;
+    const marginRiskSetting = account.useGlobalStrategy ? appSettings.positionSizeQuote : account.positionSizeQuote;
+    const enableTpSetting = account.useGlobalStrategy ? appSettings.enableTakeProfit : account.enableTakeProfit;
+    const tpPrcSetting = account.useGlobalStrategy ? appSettings.takeProfitPrc : account.takeProfitPrc;
+    const enableSlSetting = account.useGlobalStrategy ? appSettings.enableStopLoss : account.enableStopLoss;
+    const slPrcSetting = account.useGlobalStrategy ? appSettings.stopLossPrc : account.stopLossPrc;
+
+    const leverage = parseInt(leverageSetting) || 5;
     const isLong = appSettings.positionSide?.toLowerCase() !== 'short';
     const side = isLong ? 'buy' : 'sell';
 
-    const marginModeString = appSettings.marginMode || 'cross';
+    const marginModeString = marginModeSetting || 'cross';
     const openType = marginModeString === 'isolated' ? 1 : 2;
     
-    addLog(`Sending Market ${side.toUpperCase()} on ${symbol} at ${leverage}x Lev. Margin risk (USDT): ${appSettings.positionSizeQuote} Mode: ${marginModeString}`);
-    
-    if (!appSettings.isLiveTradingEnabled) {
-      addLog(`[SIMULATION MODE] Order request NOT sent to MEXC (Safe Mode is ON).`);
-      setTimeout(() => {
-        let tpMsg = appSettings.enableTakeProfit ? `+${appSettings.takeProfitPrc}%` : "OFF";
-        let slMsg = appSettings.enableStopLoss ? `-${appSettings.stopLossPrc}%` : "OFF";
-        addLog(`[SIMULATION] ORDER FILLED: ${symbol} ${side.toUpperCase()}. Placed TP ${tpMsg} / SL ${slMsg} `);
-      }, 1000);
-      return;
-    }
+    addLog(`[${account.name}] Sending Market ${side.toUpperCase()} on ${symbol} at ${leverage}x Lev. Margin risk (USDT): ${marginRiskSetting} Mode: ${marginModeString}`);
 
     // Attempt to set leverage first
     try {
@@ -194,31 +281,63 @@ async function executeMexcTrade() {
     }
     
     // Notional value = Margin * Leverage
-    const marginRisk = parseFloat(appSettings.positionSizeQuote);
+    const marginRisk = parseFloat(marginRiskSetting);
     const notionalUsdt = marginRisk * leverage;
     
     // Amount in base currency
     const amount = notionalUsdt / price;
     const formattedAmount = exchange.amountToPrecision(symbol, amount);
     
-    addLog(`Calculated quantity: ${formattedAmount} (Notional: ~${notionalUsdt} USDT) at price ${price}`);
+    addLog(`[${account.name}] Calculated quantity: ${formattedAmount} (Notional: ~${notionalUsdt} USDT) at price ${price}`);
 
     // Execute Main Market Order
     const order = await exchange.createMarketOrder(symbol, side, parseFloat(formattedAmount), undefined, {
       marginMode: marginModeString,
       leverage: leverage
     });
-    addLog(`✅ LIVE Trade Executed: ${order.id} | Status: ${order.status}`);
+    
+    addLog(`✅ [${account.name}] LIVE Trade Executed: ${order.id} | Status: ${order.status}`, false);
 
     // TP / SL setup using Trigger Orders (Plan Orders)
-    const tpDist = price * (parseFloat(appSettings.takeProfitPrc) / 100);
-    const slDist = price * (parseFloat(appSettings.stopLossPrc) / 100);
+    const tpDist = price * (parseFloat(tpPrcSetting) / 100);
+    const slDist = price * (parseFloat(slPrcSetting) / 100);
     const tpPriceStr = exchange.priceToPrecision(symbol, isLong ? price + tpDist : price - tpDist);
     const slPriceStr = exchange.priceToPrecision(symbol, isLong ? price - slDist : price + slDist);
     const closeSide = isLong ? 'sell' : 'buy';
+
+    if (eventDetails) {
+      const tradeTimeMs = Date.now();
+      const delaySec = ((tradeTimeMs - eventDetails.messageTimestampMs) / 1000).toFixed(3);
+      
+      let msg = `🚀 <b>Сделка открыта!</b>\n\n` +
+                  `🔹 Аккаунт: ${account.name}\n` +
+                  `🔑 Триггер: "${eventDetails.matchedKeyword}"\n` +
+                  `💰 Монета: ${symbol}\n` +
+                  `📈 Направление: ${isLong ? 'LONG 🟢' : 'SHORT 🔴'}\n` +
+                  `⚙️ Маржа: ${marginModeSetting.toUpperCase()}\n` +
+                  `⚖️ Плечо: ${leverage}x\n` +
+                  `💵 Риск: ${marginRiskSetting} USDT\n` +
+                  `💲 Цена входа: ${price}\n` +
+                  `📦 Размер: ${formattedAmount} монет (~${notionalUsdt.toFixed(2)} USDT)\n`;
+
+      if (enableTpSetting && tpDist > 0) {
+        msg += `🎯 Тейк-профит: ${tpPriceStr} (+${tpPrcSetting}%)\n`;
+      } else {
+        msg += `🎯 Тейк-профит: ВЫКЛ\n`;
+      }
+      if (enableSlSetting && slDist > 0) {
+        msg += `🛑 Стоп-лосс: ${slPriceStr} (-${slPrcSetting}%)\n`;
+      } else {
+        msg += `🛑 Стоп-лосс: ВЫКЛ\n`;
+      }
+
+      msg += `⏱ Задержка: ${delaySec} сек`;
+                  
+      sendTelegramNotification(msg, 'HTML');
+    }
     
     // Take Profit Trigger
-    if (appSettings.enableTakeProfit && tpDist > 0) {
+    if (enableTpSetting && tpDist > 0) {
       try {
         const tpOrder = await exchange.createOrder(symbol, 'market', closeSide, parseFloat(formattedAmount), undefined, {
           triggerPrice: tpPriceStr,
@@ -228,14 +347,14 @@ async function executeMexcTrade() {
           marginMode: marginModeString,
           leverage: leverage
         });
-        addLog(`✅ Take Profit Plan Order Set at ${tpPriceStr}`);
+        addLog(`✅ [${account.name}] Take Profit Plan Order Set at ${tpPriceStr}`);
       } catch (e: any) {
-        addLog(`❌ Failed to set Take Profit: ${e.message}`);
+        addLog(`❌ [${account.name}] Failed to set Take Profit: ${e.message}`);
       }
     }
     
     // Stop Loss Trigger
-    if (appSettings.enableStopLoss && slDist > 0) {
+    if (enableSlSetting && slDist > 0) {
       try {
         const slOrder = await exchange.createOrder(symbol, 'market', closeSide, parseFloat(formattedAmount), undefined, {
           triggerPrice: slPriceStr,
@@ -245,14 +364,26 @@ async function executeMexcTrade() {
           marginMode: marginModeString,
           leverage: leverage
         });
-        addLog(`✅ Stop Loss Plan Order Set at ${slPriceStr}`);
+        addLog(`✅ [${account.name}] Stop Loss Plan Order Set at ${slPriceStr}`);
       } catch (e: any) {
-        addLog(`❌ Failed to set Stop Loss: ${e.message}`);
+        addLog(`❌ [${account.name}] Failed to set Stop Loss: ${e.message}`);
       }
     }
 
   } catch (error: any) {
-    addLog(`API ERROR in executeTrade: ${error.message || error}`);
+    addLog(`API ERROR in executeTrade for [${account.name}]: ${error.message || error}`, true);
+  }
+}
+
+async function executeMexcTrade(eventDetails?: { matchedKeyword: string, messageTimestampMs: number }) {
+  if (!appSettings.mexcAccounts || appSettings.mexcAccounts.length === 0) {
+    addLog("ERROR: No MEXC accounts configured.");
+    return;
+  }
+
+  // Execute for all configured accounts
+  for (const account of appSettings.mexcAccounts) {
+    executeTradeForAccount(account, eventDetails);
   }
 }
 
@@ -270,6 +401,9 @@ async function startServer() {
 
   app.post("/api/settings", (req, res) => {
     appSettings = { ...appSettings, ...req.body };
+    if (appSettings.telegramBotToken) appSettings.telegramBotToken = appSettings.telegramBotToken.trim();
+    if (appSettings.telegramChatId) appSettings.telegramChatId = appSettings.telegramChatId.trim();
+    saveSettings();
     addLog(`Settings updated. Bot is ${appSettings.isRunning ? 'Active' : 'Offline'}`);
     res.json({ success: true, settings: appSettings });
   });
@@ -280,19 +414,44 @@ async function startServer() {
 
   app.post("/api/toggle", async (req, res) => {
     appSettings.isRunning = !appSettings.isRunning;
+    saveSettings();
     
     if (appSettings.isRunning) {
         addLog(`Bot status toggled to: Active. Starting fast socket listener...`);
-        await startTgClient();
+        startTgClient().catch(e => console.error(e));
     } else {
         addLog(`Bot status toggled to: Offline. Stopping socket listener...`);
-        await stopTgClient();
+        stopTgClient().catch(e => console.error(e));
     }
     
     res.json({ isRunning: appSettings.isRunning });
   });
 
   // Manual trigger for testing
+  app.post("/api/test-notification", async (req, res) => {
+    addLog("🔔 Test notification triggered from UI.");
+    
+    // Send mock formatted message
+    let msg = `🚀 <b>Сделка открыта!</b>\n\n` +
+                `🔹 Аккаунт: Test Account\n` +
+                `🔑 Триггер: "test_keyword"\n` +
+                `💰 Монета: TON/USDT\n` +
+                `📈 Направление: LONG 🟢\n` +
+                `⚙️ Маржа: ISOLATED\n` +
+                `⚖️ Плечо: 10x\n` +
+                `💵 Риск: 50 USDT\n` +
+                `💲 Цена входа: 4.882\n` +
+                `📦 Размер: 102.4 монет (~500.00 USDT)\n`;
+
+    msg += `🎯 Тейк-профит: 4.930 (+1%)\n`;
+    msg += `🛑 Стоп-лосс: 4.833 (-1%)\n`;
+    msg += `⏱ Задержка: 0.134 сек`;
+                
+    sendTelegramNotification(msg, 'HTML');
+    
+    res.json({ success: true });
+  });
+
   app.post("/api/test-buy", (req, res) => {
       addLog("Manual test buy triggered from UI.");
       executeMexcTrade();
@@ -316,6 +475,10 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    if (appSettings.isRunning) {
+      addLog(`🟢 Server successfully restarted from previous state. Resuming fast socket listener...`, true);
+      startTgClient();
+    }
   });
 }
 

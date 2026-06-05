@@ -91,11 +91,16 @@ const systemLogs: string[] = [
   `[${new Date().toISOString()}] System initialized.`
 ];
 
-async function sendTelegramNotification(message: string, parseMode: string = "") {
-  if (!appSettings.telegramBotToken || !appSettings.telegramChatId) return;
+async function sendTelegramNotification(message: string, parseMode: string = "", targetChatIdsStr?: string) {
+  if (!appSettings.telegramBotToken) return;
   try {
     const url = `https://api.telegram.org/bot${appSettings.telegramBotToken}/sendMessage`;
-    const chatIds = appSettings.telegramChatId.split(',').map(id => id.trim()).filter(id => id);
+    
+    let chatIdsToUseStr = targetChatIdsStr ? targetChatIdsStr : appSettings.telegramChatId;
+    if (!chatIdsToUseStr) chatIdsToUseStr = appSettings.telegramChatId;
+    if (!chatIdsToUseStr) return;
+
+    const chatIds = chatIdsToUseStr.split(',').map(id => id.trim()).filter(id => id);
     
     for (const chatId of chatIds) {
       const payload: any = {
@@ -338,7 +343,7 @@ async function executeTradeForAccount(account: any, eventDetails?: { matchedKeyw
 
       msg += `⏱ Задержка: ${delaySec} сек`;
                   
-      sendTelegramNotification(msg, 'HTML');
+      sendTelegramNotification(msg, 'HTML', account.telegramChatId);
     }
     
     // Take Profit Trigger

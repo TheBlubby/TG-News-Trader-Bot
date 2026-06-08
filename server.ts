@@ -7,7 +7,15 @@ import { StringSession } from "telegram/sessions/index.js";
 import { NewMessage } from "telegram/events/index.js";
 import crypto from "crypto";
 import ccxt from "ccxt";
+import { HttpsProxyAgent } from "https-proxy-agent";
 import fs from "fs";
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+});
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
 
 const SETTINGS_FILE = path.join(process.cwd(), "settings.json");
 
@@ -38,6 +46,8 @@ const defaultSettings = {
       name: "Main Account",
       apiKey: "",
       apiSecret: "",
+      proxyUrl: "",
+      telegramChatId: "",
       useGlobalStrategy: true,
       positionSizeQuote: "50", 
       leverage: "10",
@@ -211,6 +221,34 @@ async function stopTgClient() {
   }
 }
 
+function formatProxyUrl(proxyInput: string | undefined): string | undefined {
+  if (!proxyInput) return undefined;
+  
+  const cleaned = proxyInput.replace(/[\s\r\n]+/g, '');
+  if (!cleaned) return undefined;
+
+  // if starts with http:// or https:// or socks, assume it's already well-formatted
+  if (cleaned.startsWith('http://') || cleaned.startsWith('https://') || cleaned.startsWith('socks')) {
+    return cleaned;
+  }
+
+  const parts = cleaned.split(':');
+  if (parts.length >= 4) {
+    // format: ip:port:username:password
+    const ip = parts[0];
+    const port = parts[1];
+    const username = encodeURIComponent(parts[2]);
+    const password = encodeURIComponent(parts.slice(3).join(':'));
+    return `http://${username}:${password}@${ip}:${port}`;
+  } else if (parts.length === 2) {
+    // format: ip:port (no auth)
+    const [ip, port] = parts;
+    return `http://${ip}:${port}`;
+  }
+  
+  return cleaned; // fallback
+}
+
 // Helper to interact with MEXC Futures API v1 through CCXT
 async function executeTradeForAccount(account: any, eventDetails?: { matchedKeyword: string, messageTimestampMs: number }) {
   if (!account.apiKey || !account.apiSecret) {
@@ -219,14 +257,23 @@ async function executeTradeForAccount(account: any, eventDetails?: { matchedKeyw
   }
 
   try {
-    const exchange = new ccxt.mexc({
+    const exchangeConfig: any = {
       apiKey: account.apiKey,
       secret: account.apiSecret,
       options: {
         defaultType: 'swap',
       },
       enableRateLimit: false, // We want instant execution
-    });
+    };
+
+    if (account.proxyUrl && account.proxyUrl.trim() !== '') {
+      const formattedProxy = formatProxyUrl(account.proxyUrl);
+      if (formattedProxy) {
+        exchangeConfig.httpsProxy = formattedProxy;
+      }
+    }
+
+    const exchange = new ccxt.mexc(exchangeConfig);
 
     // Formatting symbol for CCXT e.g., TON_USDT -> TON/USDT:USDT
     const baseSymbol = appSettings.symbol.replace('_', '/');
@@ -435,6 +482,49 @@ async function startServer() {
     }
     
     res.json({ isRunning: appSettings.isRunning });
+  });
+
+  app.post("/api/test-proxy", async (req, res) => {
+    const { proxyUrl } = req.body;
+    if (!proxyUrl) {
+      return res.json({ success: false, message: "No proxy URL provided." });
+    }
+
+    try {
+      const formattedProxy = formatProxyUrl(proxyUrl);
+      if (!formattedProxy) {
+        return res.json({ success: false, message: "Invalid proxy format." });
+      }
+
+      // Test with axios first to provide clean error messages
+      const agent = new HttpsProxyAgent(formattedProxy);
+      try {
+        await axios.get('https://api.mexc.com/api/v3/time', {
+          httpsAgent: agent,
+          timeout: 10000,
+        });
+      } catch (axiosError: any) {
+        let msg = axiosError.message;
+        if (axiosError.response) {
+            msg = `Status ${axiosError.response.status}: ${JSON.stringify(axiosError.response.data)}`;
+        }
+        if (msg.includes('407')) {
+             throw new Error("Proxy Authentication Required (407). Check your proxy username and password.");
+        }
+        throw new Error(`Proxy connection failed: ${msg}`);
+      }
+
+      // If axios succeeds, test ccxt
+      const exchangeConfig: any = { enableRateLimit: false, httpsProxy: formattedProxy };
+      const exchange = new ccxt.mexc(exchangeConfig);
+
+      await exchange.fetchTime();
+      addLog(`✅ Proxy test successful for: ${formattedProxy}`);
+      res.json({ success: true, message: `Proxy is working! (${formattedProxy})` });
+    } catch (error: any) {
+      addLog(`❌ Proxy test failed: ${error.message}`);
+      res.json({ success: false, message: error.message });
+    }
   });
 
   // Manual trigger for testing

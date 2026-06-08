@@ -77,6 +77,8 @@ try {
 function saveSettings() {
   try {
     fs.writeFileSync(SETTINGS_FILE, JSON.stringify(appSettings, null, 2), "utf-8");
+    // Fire and forget warmup on any settings update so that next trade uses fresh credentials
+    warmUpMexcExchanges().catch(e => console.error(e));
   } catch (e) {
     console.error("Failed to save settings file:", e);
   }
@@ -147,9 +149,77 @@ function addLog(msg: string, notify: boolean = false) {
   if (notify) sendTelegramNotification(`[LOG] ${msg}`);
 }
 
+let prewarmedExchanges: Record<string, ccxt.mexc> = {};
+
+async function warmUpMexcExchanges() {
+  prewarmedExchanges = {};
+  if (!appSettings.mexcAccounts) return;
+  
+  addLog("Warming up MEXC connections and caching markets pre-trade...");
+  for (const account of appSettings.mexcAccounts) {
+    if (!account.apiKey || !account.apiSecret) continue;
+    try {
+      const exchangeConfig: any = {
+        apiKey: account.apiKey,
+        secret: account.apiSecret,
+        options: { defaultType: 'swap' },
+        enableRateLimit: false,
+      };
+      
+      if (account.proxyUrl && account.proxyUrl.trim() !== '') {
+        const formattedProxy = formatProxyUrl(account.proxyUrl);
+        if (formattedProxy) {
+          exchangeConfig.httpsProxy = formattedProxy;
+        }
+      }
+      
+      const exchange = new ccxt.mexc(exchangeConfig);
+      await exchange.loadMarkets(); // Super slow! Doing this here saves 1-2s during actual trade
+      
+      const baseSymbol = (appSettings.symbol || "").replace('_', '/');
+      let symbol = baseSymbol.includes(':') ? baseSymbol : `${baseSymbol}:USDT`;
+      
+      if (!exchange.markets[symbol]) {
+        const parts = symbol.split('/');
+        if (parts.length === 2 && exchange.markets[`${parts[0]}COIN/${parts[1]}`]) {
+          symbol = `${parts[0]}COIN/${parts[1]}`;
+        } else {
+          const base = parts[0];
+          const possible = Object.keys(exchange.markets).find(m => m.startsWith(base) && m.endsWith(':USDT'));
+          if (possible) symbol = possible;
+        }
+      }
+
+      if (exchange.markets[symbol]) {
+        const isLong = appSettings.positionSide?.toLowerCase() !== 'short';
+        const leverageSetting = account.useGlobalStrategy ? appSettings.leverage : account.leverage;
+        const leverage = parseInt(leverageSetting) || 5;
+        const marginModeString = (account.useGlobalStrategy ? appSettings.marginMode : account.marginMode) || 'cross';
+        const openType = marginModeString === 'isolated' ? 1 : 2;
+        try {
+          await exchange.setLeverage(leverage, symbol, {
+            openType: openType, 
+            positionType: isLong ? 1 : 2
+          });
+          addLog(`✅ [${account.name}] Pre-set Leverage: ${leverage}x on ${symbol}`);
+        } catch (e: any) {
+          addLog(`⚠️ [${account.name}] Pre-set Leverage skipped: ${e.message}`);
+        }
+      }
+
+      prewarmedExchanges[account.apiKey] = exchange;
+      addLog(`✅ [${account.name}] CCXT Pre-warmed & markets cached.`);
+    } catch (e: any) {
+      addLog(`⚠️ Failed to pre-warm account ${account.name}: ${e.message}`);
+    }
+  }
+}
+
 let tgClient: TelegramClient | null = null;
 
 async function startTgClient() {
+  await warmUpMexcExchanges();
+
   if (!appSettings.tgApiId || !appSettings.tgApiHash || !appSettings.tgSessionString) {
     addLog("ERROR: Telegram API ID, Hash, or Session String missing. Cannot start fast listener.");
     appSettings.isRunning = false;
@@ -257,30 +327,33 @@ async function executeTradeForAccount(account: any, eventDetails?: { matchedKeyw
   }
 
   try {
-    const exchangeConfig: any = {
-      apiKey: account.apiKey,
-      secret: account.apiSecret,
-      options: {
-        defaultType: 'swap',
-      },
-      enableRateLimit: false, // We want instant execution
-    };
+    let exchange = prewarmedExchanges[account.apiKey];
+    if (!exchange) {
+      addLog(`⚠️ [${account.name}] Pre-warmed CCXT not found, initializing...`);
+      const exchangeConfig: any = {
+        apiKey: account.apiKey,
+        secret: account.apiSecret,
+        options: {
+          defaultType: 'swap',
+        },
+        enableRateLimit: false, // We want instant execution
+      };
 
-    if (account.proxyUrl && account.proxyUrl.trim() !== '') {
-      const formattedProxy = formatProxyUrl(account.proxyUrl);
-      if (formattedProxy) {
-        exchangeConfig.httpsProxy = formattedProxy;
+      if (account.proxyUrl && account.proxyUrl.trim() !== '') {
+        const formattedProxy = formatProxyUrl(account.proxyUrl);
+        if (formattedProxy) {
+          exchangeConfig.httpsProxy = formattedProxy;
+        }
       }
-    }
 
-    const exchange = new ccxt.mexc(exchangeConfig);
+      exchange = new ccxt.mexc(exchangeConfig);
+      await exchange.loadMarkets();
+      prewarmedExchanges[account.apiKey] = exchange;
+    }
 
     // Formatting symbol for CCXT e.g., TON_USDT -> TON/USDT:USDT
     const baseSymbol = appSettings.symbol.replace('_', '/');
     let symbol = baseSymbol.includes(':') ? baseSymbol : `${baseSymbol}:USDT`;
-    
-    // Handle symbol translations properly
-    await exchange.loadMarkets();
 
     // Verify if symbol exists in ccxt markets, or try to find it
     if (!exchange.markets[symbol]) {
@@ -318,20 +391,16 @@ async function executeTradeForAccount(account: any, eventDetails?: { matchedKeyw
     
     addLog(`[${account.name}] Sending Market ${side.toUpperCase()} on ${symbol} at ${leverage}x Lev. Margin risk (USDT): ${marginRiskSetting} Mode: ${marginModeString}`);
 
-    // Attempt to set leverage first
-    try {
-      await exchange.setLeverage(leverage, symbol, {
-        openType: openType, 
-        positionType: isLong ? 1 : 2 // 1 for long, 2 for short
-      });
-      addLog(`✅ Leverage set to ${leverage}x`);
-    } catch (e: any) {
-      addLog(`⚠️ Leverage setup (can be ignored if already set): ${e.message}`);
-    }
+    // Concurrent execution of ticker fetch and leverage setting to save 100-300ms latency
+    const leveragePromise = exchange.setLeverage(leverage, symbol, {
+      openType: openType, 
+      positionType: isLong ? 1 : 2
+    }).catch((e: any) => addLog(`⚠️ Leverage setup skipped: ${e.message}`));
 
-    // To send the right amount, calculate quantity in base token based on current price
-    // We treat positionSizeQuote as the Margin USDT to risk.
-    const ticker = await exchange.fetchTicker(symbol);
+    const tickerPromise = exchange.fetchTicker(symbol);
+
+    const [ticker] = await Promise.all([tickerPromise, leveragePromise]);
+    
     const price = ticker.last;
     if (!price) {
       throw new Error("Could not fetch current price for " + symbol);
@@ -393,39 +462,46 @@ async function executeTradeForAccount(account: any, eventDetails?: { matchedKeyw
       sendTelegramNotification(msg, 'HTML', account.telegramChatId);
     }
     
-    // Take Profit Trigger
+    // TP / SL setup using Trigger Orders (Plan Orders) - Executed in parallel
+    const planPromises: Promise<void>[] = [];
+
     if (enableTpSetting && tpDist > 0) {
-      try {
-        const tpOrder = await exchange.createOrder(symbol, 'market', closeSide, parseFloat(formattedAmount), undefined, {
-          triggerPrice: tpPriceStr,
-          triggerType: isLong ? 1 : 2, // 1: >= triggerPrice, 2: <= triggerPrice
-          reduceOnly: true,
-          orderType: 5, // 5 for Market order when triggered
-          marginMode: marginModeString,
-          leverage: leverage
-        });
-        addLog(`✅ [${account.name}] Take Profit Plan Order Set at ${tpPriceStr}`);
-      } catch (e: any) {
-        addLog(`❌ [${account.name}] Failed to set Take Profit: ${e.message}`);
-      }
+      planPromises.push((async () => {
+        try {
+          await exchange.createOrder(symbol, 'market', closeSide, parseFloat(formattedAmount), undefined, {
+            triggerPrice: tpPriceStr,
+            triggerType: isLong ? 1 : 2, 
+            reduceOnly: true,
+            orderType: 5,
+            marginMode: marginModeString,
+            leverage: leverage
+          });
+          addLog(`✅ [${account.name}] Take Profit Plan Order Set at ${tpPriceStr}`);
+        } catch (e: any) {
+          addLog(`❌ [${account.name}] Failed to set Take Profit: ${e.message}`);
+        }
+      })());
     }
     
-    // Stop Loss Trigger
     if (enableSlSetting && slDist > 0) {
-      try {
-        const slOrder = await exchange.createOrder(symbol, 'market', closeSide, parseFloat(formattedAmount), undefined, {
-          triggerPrice: slPriceStr,
-          triggerType: isLong ? 2 : 1, // 2: <= triggerPrice, 1: >= triggerPrice
-          reduceOnly: true,
-          orderType: 5, // 5 for Market order when triggered
-          marginMode: marginModeString,
-          leverage: leverage
-        });
-        addLog(`✅ [${account.name}] Stop Loss Plan Order Set at ${slPriceStr}`);
-      } catch (e: any) {
-        addLog(`❌ [${account.name}] Failed to set Stop Loss: ${e.message}`);
-      }
+      planPromises.push((async () => {
+        try {
+          await exchange.createOrder(symbol, 'market', closeSide, parseFloat(formattedAmount), undefined, {
+            triggerPrice: slPriceStr,
+            triggerType: isLong ? 2 : 1,
+            reduceOnly: true,
+            orderType: 5,
+            marginMode: marginModeString,
+            leverage: leverage
+          });
+          addLog(`✅ [${account.name}] Stop Loss Plan Order Set at ${slPriceStr}`);
+        } catch (e: any) {
+          addLog(`❌ [${account.name}] Failed to set Stop Loss: ${e.message}`);
+        }
+      })());
     }
+
+    await Promise.all(planPromises);
 
   } catch (error: any) {
     addLog(`API ERROR in executeTrade for [${account.name}]: ${error.message || error}`, true);

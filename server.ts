@@ -248,14 +248,51 @@ async function startTgClient() {
     await Promise.race([tgPromise, timeoutPromise]);
     addLog("✅ Connected to Telegram MTProto instantly.");
 
+    let targetEntity: any = null;
+    try {
+      if (appSettings.telegramTargetChannel) {
+        // Gramjs string username filtering is unreliable, so we resolve the entity first.
+        targetEntity = await tgClient.getEntity(appSettings.telegramTargetChannel);
+        addLog(`Successfully resolved target channel entity: ${targetEntity.title || appSettings.telegramTargetChannel}`);
+      }
+    } catch (e: any) {
+      addLog(`⚠️ Could not resolve channel entity for '${appSettings.telegramTargetChannel}'. Real-time detection might fail. Error: ${e.message}`);
+    }
+
     tgClient.addEventHandler(async (event: any) => {
       const receiveTimeMs = Date.now();
       const message = event.message;
       let text = message.message || "";
+      
+      const debugText = text ? text.substring(0, 50).replace(/\n/g, ' ') : "[Media/Empty Caption]";
+      
+      const targetStr = appSettings.telegramTargetChannel ? appSettings.telegramTargetChannel.replace('@', '').toLowerCase() : null;
+      let isMatch = false;
+      
+      try {
+        const chat = await message.getChat();
+        if (chat) {
+          const chatUsername = (chat.username || "").toLowerCase();
+          const chatTitle = (chat.title || "").toLowerCase();
+          const chatIdStr = chat.id ? chat.id.toString() : "";
+          
+          if (targetStr && (chatUsername === targetStr || chatTitle === targetStr || chatIdStr === targetStr || chatIdStr === `-100${targetStr}` || (targetEntity && targetEntity.id && targetEntity.id.toString() === chatIdStr))) {
+             isMatch = true;
+          }
+        }
+      } catch (e) {
+        // Fallback or ignore
+      }
+
+      if (!isMatch && appSettings.telegramTargetChannel) {
+         // Do not log every mismatch from other channels unless debugging
+         return;
+      }
+
+      addLog(`⚡ Instant Message Detected from Target: "${debugText}... "`);
+      
       if (!text) return;
       text = text.toLowerCase();
-
-      addLog(`⚡ Instant Message Detected: "${text.substring(0, 50)}..."`);
       
       const matchedKeyword = appSettings.keywords.find(keyword => text.includes(keyword.toLowerCase()));
       if (matchedKeyword) {
@@ -269,7 +306,7 @@ async function startTgClient() {
          addLog("Bot stopped and disconnected to prevent duplicate executions.");
       }
 
-    }, new NewMessage({ chats: [appSettings.telegramTargetChannel] }));
+    }, new NewMessage({}));
 
     addLog(`Ear listening on socket for: ${appSettings.telegramTargetChannel} with ~0ms delay.`);
   } catch (err: any) {
@@ -504,7 +541,12 @@ async function executeTradeForAccount(account: any, eventDetails?: { matchedKeyw
     await Promise.all(planPromises);
 
   } catch (error: any) {
-    addLog(`API ERROR in executeTrade for [${account.name}]: ${error.message || error}`, true);
+    const errorMsg = error.message || String(error);
+    if (errorMsg.includes('6026') || errorMsg.includes('verification is completed')) {
+      addLog(`FATAL ERROR [${account.name}]: KYC/Risk Verification Required. You must complete identity verification on your MEXC app/website before trading via API.`, true);
+    } else {
+      addLog(`API ERROR in executeTrade for [${account.name}]: ${errorMsg}`, true);
+    }
   }
 }
 

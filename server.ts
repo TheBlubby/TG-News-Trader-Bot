@@ -5,6 +5,7 @@ import axios from "axios";
 import { TelegramClient } from "telegram";
 import { StringSession } from "telegram/sessions/index.js";
 import { NewMessage } from "telegram/events/index.js";
+import { EditedMessage } from "telegram/events/EditedMessage.js";
 import crypto from "crypto";
 import ccxt from "ccxt";
 import { HttpsProxyAgent } from "https-proxy-agent";
@@ -259,65 +260,35 @@ async function startTgClient() {
       addLog(`⚠️ Could not resolve channel entity for '${appSettings.telegramTargetChannel}'. Real-time detection might fail. Error: ${e.message}`);
     }
 
-    tgClient.addEventHandler(async (event: any) => {
-      const receiveTimeMs = Date.now();
-      const message = event.message;
-      let text = message.message || "";
-      
-      const debugText = text ? text.substring(0, 50).replace(/\n/g, ' ') : "[Media/Empty Caption]";
-      
-      const targetStr = appSettings.telegramTargetChannel ? appSettings.telegramTargetChannel.replace('@', '').toLowerCase() : null;
-      let isMatch = false;
-      
-      try {
-        const peerId = message.peerId;
-        const chatId = peerId ? (peerId.channelId || peerId.chatId || peerId.userId) : null;
-        let chatIdStr = chatId ? chatId.toString().replace("-100", "") : "";
-        let chatResolvedIdStr = "";
-        
-        let targetEntityIdStr = (targetEntity && targetEntity.id) ? targetEntity.id.toString().replace("-100", "") : "";
-
-        const chat = await message.getChat();
-        if (chat) {
-          const chatUsername = (chat.username || "").toLowerCase();
-          const chatTitle = (chat.title || "").toLowerCase();
-          chatResolvedIdStr = chat.id ? chat.id.toString().replace("-100", "") : "";
-          
-          if (targetStr && (
-              chatUsername === targetStr || 
-              chatTitle === targetStr || 
-              chatIdStr === targetStr || 
-              chatResolvedIdStr === targetStr ||
-              (targetEntityIdStr && (targetEntityIdStr === chatIdStr || targetEntityIdStr === chatResolvedIdStr))
-             )) {
-             isMatch = true;
-          }
-        } else {
-           // fallback to peerId
-           if (targetStr && (
-               chatIdStr === targetStr || 
-               (targetEntityIdStr && targetEntityIdStr === chatIdStr)
-           )) {
-               isMatch = true;
-           }
+    let lastProcessedMsgId = 0;
+    
+    if (targetEntity) {
+        try {
+            const initialMessages = await tgClient.getMessages(targetEntity, { limit: 1 });
+            if (initialMessages && initialMessages.length > 0) {
+                lastProcessedMsgId = initialMessages[0].id;
+                addLog(`[DEBUG] Initial message ID for fallback polling set to: ${lastProcessedMsgId}`);
+            }
+        } catch (e: any) {
+            console.log("Could not fetch initial message ID for polling", e.message);
         }
-      } catch (e) {
-        // Fallback or ignore
-      }
+    }
 
-      if (!isMatch && appSettings.telegramTargetChannel) {
-         // Do not log every mismatch from other channels unless debugging
-         return;
-      }
-
-      addLog(`⚡ Instant Message Detected from Target: "${debugText}... "`);
-
-      
+    const processMessage = async (message: any, receiveTimeMs: number, source: string) => {
+      let text = message.message || "";
       if (!text) return;
+      
+      const debugText = text.substring(0, 50).replace(/\n/g, ' ');
+      addLog(`⚡ [${source}] Instant Message Detected: "${debugText}... "`);
+      
       text = text.toLowerCase();
       
       const matchedKeyword = appSettings.keywords.find(keyword => text.includes(keyword.toLowerCase()));
       if (matchedKeyword) {
+         if (message.id > lastProcessedMsgId) {
+             lastProcessedMsgId = message.id;
+         }
+
          addLog(`🟢 KEYWORD MATCH DETECTED OVER SOCKET! Triggering Trading Logic. (Matched phrase: "${matchedKeyword}")`, false);
          executeMexcTrade({ matchedKeyword, messageTimestampMs: receiveTimeMs });
          
@@ -327,10 +298,54 @@ async function startTgClient() {
          await stopTgClient();
          addLog("Bot stopped and disconnected to prevent duplicate executions.");
       }
+    };
 
-    }, new NewMessage({}));
+    const handleTelegramEvent = async (event: any) => {
+      const receiveTimeMs = Date.now();
+      const message = event.message;
+      if (message.id <= lastProcessedMsgId) {
+          // You could allow edited if same ID, but for now we process it so we don't miss delayed text
+          if (event.className === "UpdateEditChannelMessage" || event.className === "UpdateEditMessage") {
+               // allow
+          } else {
+               // return; // We shouldn't strict return here just in case ID didn't update or was cached
+          }
+      }
+      if (message.id > lastProcessedMsgId) {
+          lastProcessedMsgId = message.id;
+      }
+      await processMessage(message, receiveTimeMs, "Event");
+    };
 
+    const eventOptions = targetEntity ? { chats: [targetEntity] } : {};
+    
+    tgClient.addEventHandler(handleTelegramEvent, new NewMessage(eventOptions));
+    tgClient.addEventHandler(handleTelegramEvent, new EditedMessage(eventOptions));
+    
     addLog(`Ear listening on socket for: ${appSettings.telegramTargetChannel} with ~0ms delay.`);
+    
+    // Background polling fallback as requested for maximum reliability
+    if (targetEntity) {
+        let pollInterval = setInterval(async () => {
+            if (!appSettings.isRunning || !tgClient) {
+                clearInterval(pollInterval);
+                return;
+            }
+            try {
+                const messages = await tgClient.getMessages(targetEntity, { limit: 1 });
+                if (messages && messages.length > 0) {
+                    const msg = messages[0];
+                    if (msg.id > lastProcessedMsgId) {
+                        lastProcessedMsgId = msg.id;
+                        await processMessage(msg, Date.now(), "PollingFallaback");
+                    }
+                }
+            } catch (e) {
+                // ignore
+            }
+        }, 1000);
+    }
+
   } catch (err: any) {
     addLog(`Telegram Client Error: ${err.message}`);
     appSettings.isRunning = false;

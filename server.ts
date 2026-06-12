@@ -270,15 +270,36 @@ async function startTgClient() {
       let isMatch = false;
       
       try {
+        const peerId = message.peerId;
+        const chatId = peerId ? (peerId.channelId || peerId.chatId || peerId.userId) : null;
+        let chatIdStr = chatId ? chatId.toString().replace("-100", "") : "";
+        let chatResolvedIdStr = "";
+        
+        let targetEntityIdStr = (targetEntity && targetEntity.id) ? targetEntity.id.toString().replace("-100", "") : "";
+
         const chat = await message.getChat();
         if (chat) {
           const chatUsername = (chat.username || "").toLowerCase();
           const chatTitle = (chat.title || "").toLowerCase();
-          const chatIdStr = chat.id ? chat.id.toString() : "";
+          chatResolvedIdStr = chat.id ? chat.id.toString().replace("-100", "") : "";
           
-          if (targetStr && (chatUsername === targetStr || chatTitle === targetStr || chatIdStr === targetStr || chatIdStr === `-100${targetStr}` || (targetEntity && targetEntity.id && targetEntity.id.toString() === chatIdStr))) {
+          if (targetStr && (
+              chatUsername === targetStr || 
+              chatTitle === targetStr || 
+              chatIdStr === targetStr || 
+              chatResolvedIdStr === targetStr ||
+              (targetEntityIdStr && (targetEntityIdStr === chatIdStr || targetEntityIdStr === chatResolvedIdStr))
+             )) {
              isMatch = true;
           }
+        } else {
+           // fallback to peerId
+           if (targetStr && (
+               chatIdStr === targetStr || 
+               (targetEntityIdStr && targetEntityIdStr === chatIdStr)
+           )) {
+               isMatch = true;
+           }
         }
       } catch (e) {
         // Fallback or ignore
@@ -290,6 +311,7 @@ async function startTgClient() {
       }
 
       addLog(`⚡ Instant Message Detected from Target: "${debugText}... "`);
+
       
       if (!text) return;
       text = text.toLowerCase();

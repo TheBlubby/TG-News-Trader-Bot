@@ -57,6 +57,8 @@ const defaultSettings = {
       takeProfitPrc: "15",
       enableStopLoss: true,
       stopLossPrc: "5",
+      symbol: "TON_USDT",
+      positionSide: "LONG",
     }
   ]
 };
@@ -150,7 +152,7 @@ function addLog(msg: string, notify: boolean = false) {
   if (notify) sendTelegramNotification(`[LOG] ${msg}`);
 }
 
-let prewarmedExchanges: Record<string, ccxt.mexc> = {};
+let prewarmedExchanges: Record<string, any> = {};
 
 async function warmUpMexcExchanges() {
   prewarmedExchanges = {};
@@ -244,7 +246,7 @@ async function startTgClient() {
     });
 
     const tgPromise = tgClient.connect();
-    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Telegram connection timed out (bad session/network)")), 15000));
+    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Telegram connection timed out (bad session/network)")), 30000));
     
     await Promise.race([tgPromise, timeoutPromise]);
     addLog("✅ Connected to Telegram MTProto instantly.");
@@ -264,7 +266,7 @@ async function startTgClient() {
     
     if (targetEntity) {
         try {
-            const messages = await tgClient.getMessages(targetEntity.id, { limit: 1 });
+            const messages = await tgClient.getMessages(targetEntity, { limit: 1 });
             if (messages && messages.length > 0) {
                 lastProcessedMsgId = messages[0].id;
                 addLog(`[DEBUG] Initial message ID for fallback polling set to: ${lastProcessedMsgId}`);
@@ -300,11 +302,11 @@ async function startTgClient() {
       }
     };
 
+    const targetId = targetEntity ? targetEntity.id : undefined;
+
     const handleTelegramEvent = async (event: any) => {
       const receiveTimeMs = Date.now();
       const message = event.message;
-      
-      const targetId = targetEntity ? targetEntity.id : undefined;
       
       // Fast manual channel filter (bypasses gramjs internal dialog resolving which is slow)
       if (appSettings.telegramTargetChannel && targetId) {
@@ -350,7 +352,7 @@ async function startTgClient() {
                 return;
             }
             try {
-                const messages = await tgClient.getMessages(targetId, { limit: 1 });
+                const messages = await tgClient.getMessages(targetEntity, { limit: 1 });
                 if (messages && messages.length > 0) {
                     const msg = messages[0];
                     if (msg.id > lastProcessedMsgId) {
@@ -443,8 +445,12 @@ async function executeTradeForAccount(account: any, eventDetails?: { matchedKeyw
       prewarmedExchanges[account.apiKey] = exchange;
     }
 
+    // Use account specific settings if useGlobalStrategy is false
+    const rawSymbol = account.useGlobalStrategy ? appSettings.symbol : (account.symbol || appSettings.symbol);
+    const rawSide = account.useGlobalStrategy ? appSettings.positionSide : (account.positionSide || appSettings.positionSide);
+
     // Formatting symbol for CCXT e.g., TON_USDT -> TON/USDT:USDT
-    const baseSymbol = appSettings.symbol.replace('_', '/');
+    const baseSymbol = rawSymbol.replace('_', '/');
     let symbol = baseSymbol.includes(':') ? baseSymbol : `${baseSymbol}:USDT`;
 
     // Verify if symbol exists in ccxt markets, or try to find it
@@ -475,7 +481,7 @@ async function executeTradeForAccount(account: any, eventDetails?: { matchedKeyw
     const slPrcSetting = account.useGlobalStrategy ? appSettings.stopLossPrc : account.stopLossPrc;
 
     const leverage = parseInt(leverageSetting) || 5;
-    const isLong = appSettings.positionSide?.toLowerCase() !== 'short';
+    const isLong = rawSide?.toLowerCase() !== 'short';
     const side = isLong ? 'buy' : 'sell';
 
     const marginModeString = marginModeSetting || 'cross';
@@ -503,7 +509,13 @@ async function executeTradeForAccount(account: any, eventDetails?: { matchedKeyw
     const notionalUsdt = marginRisk * leverage;
     
     // Amount in base currency
-    const amount = notionalUsdt / price;
+    let amount = notionalUsdt / price;
+    const market = exchange.markets[symbol];
+    if (market && market.contractSize) {
+        amount = amount / market.contractSize;
+    }
+    
+    // Sometimes JS floats can cause precision errors, CCXT handles it
     const formattedAmount = exchange.amountToPrecision(symbol, amount);
     
     addLog(`[${account.name}] Calculated quantity: ${formattedAmount} (Notional: ~${notionalUsdt} USDT) at price ${price}`);

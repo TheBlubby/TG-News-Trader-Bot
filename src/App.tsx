@@ -42,6 +42,8 @@ export default function App() {
     takeProfitPrc: "15",
     enableStopLoss: true,
     stopLossPrc: "5",
+    symbol: "TON_USDT",
+    positionSide: "LONG",
     keywords: [] as string[],
     isRunning: false,
     mexcAccounts: [] as any[]
@@ -347,6 +349,8 @@ export default function App() {
                         takeProfitPrc: "15",
                         enableStopLoss: true,
                         stopLossPrc: "5",
+                        symbol: "TON_USDT",
+                        positionSide: "LONG",
                       }
                     ]
                   })
@@ -458,6 +462,28 @@ export default function App() {
                        
                        <div className="grid grid-cols-2 gap-4">
                         <div>
+                          <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Trading Pair Override</label>
+                          <input type="text" value={account.symbol || ""} onChange={e => {
+                            const newAccounts = [...settings.mexcAccounts];
+                            newAccounts[index].symbol = e.target.value.toUpperCase();
+                            setSettings({...settings, mexcAccounts: newAccounts});
+                          }} className="w-full px-3 py-2 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm font-mono" placeholder={settings.symbol} />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Position Side</label>
+                          <select value={account.positionSide || settings.positionSide} onChange={e => {
+                            const newAccounts = [...settings.mexcAccounts];
+                            newAccounts[index].positionSide = e.target.value;
+                            setSettings({...settings, mexcAccounts: newAccounts});
+                          }} className="w-full px-3 py-2 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm">
+                            <option value="LONG">LONG</option>
+                            <option value="SHORT">SHORT</option>
+                          </select>
+                        </div>
+                       </div>
+                       
+                       <div className="grid grid-cols-2 gap-4">
+                        <div>
                           <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Margin Size (USDT)</label>
                           <input type="number" value={account.positionSizeQuote} onChange={e => {
                             const newAccounts = [...settings.mexcAccounts];
@@ -545,12 +571,26 @@ export default function App() {
           <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
             <div className="bg-white dark:bg-slate-900 p-6 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm">
               <div className="flex justify-between items-start mb-4">
-                 <h2 className="text-lg font-medium">Trading Parameters: TON/USDT LONG</h2>
+                 <h2 className="text-lg font-medium">Trading Parameters: GLOBAL</h2>
                  <div className="flex items-center gap-4">
                    <button onClick={executeTestBuy} className="flex items-center gap-1 text-xs font-semibold bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 hover:bg-amber-200 dark:hover:bg-amber-900/50 px-3 py-1.5 rounded-md transition-colors">
                      <Zap size={14} /> Test Order
                    </button>
                  </div>
+              </div>
+              <div className="grid grid-cols-2 gap-6 pb-6 border-b border-slate-200 dark:border-slate-800 mb-6">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Trading Pair (MEXC Symbol)</label>
+                  <input type="text" value={settings.symbol} onChange={e => setSettings({...settings, symbol: e.target.value.toUpperCase()})} className="w-full px-3 py-2 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono" placeholder="TON_USDT" />
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Example: TON_USDT, BTC_USDT, NOT_USDT</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Position Side</label>
+                  <select value={settings.positionSide} onChange={e => setSettings({...settings, positionSide: e.target.value})} className="w-full px-3 py-2 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                    <option value="LONG">LONG (Buy)</option>
+                    <option value="SHORT">SHORT (Sell)</option>
+                  </select>
+                </div>
               </div>
               <div className="grid grid-cols-2 gap-6">
                 <div>
@@ -592,8 +632,8 @@ export default function App() {
             </div>
 
             <div className="bg-white dark:bg-slate-900 p-6 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm">
-              <h2 className="text-lg font-medium mb-4">Trigger Keywords for Long Position</h2>
-              <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">The bot will instantly open a LONG position if a matched post contains ANY of these terms.</p>
+              <h2 className="text-lg font-medium mb-4">Trigger Keywords for {settings.positionSide} Position</h2>
+              <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">The bot will instantly open a {settings.positionSide} position if a matched post contains ANY of these terms.</p>
               
               <div className="flex flex-wrap gap-2 mb-4">
                 {settings.keywords.map(word => (

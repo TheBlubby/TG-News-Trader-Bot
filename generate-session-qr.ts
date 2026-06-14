@@ -30,9 +30,8 @@ import qrcode from "qrcode-terminal";
     await client.signInUserWithQrCode(
       { apiId, apiHash },
       {
-        onError: (err) => {
+        onError: (err: any) => {
           console.log("Ошибка обновления QR:", err.message);
-          return false;
         },
         qrCode: async (code) => {
           // code.token - Buffer, преобразуем в base64url

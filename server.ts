@@ -14,9 +14,9 @@ import fs from "fs";
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
 });
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-});
+// process.on('unhandledRejection', (reason, promise) => {
+//   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+// });
 
 const SETTINGS_FILE = path.join(process.cwd(), "settings.json");
 
@@ -219,8 +219,13 @@ async function warmUpMexcExchanges() {
 }
 
 let tgClient: TelegramClient | null = null;
+let pollInterval: any = null;
+let aliveCheckInterval: any = null;
 
 async function startTgClient() {
+  if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+  if (aliveCheckInterval) { clearInterval(aliveCheckInterval); aliveCheckInterval = null; }
+
   await warmUpMexcExchanges();
 
   if (!appSettings.tgApiId || !appSettings.tgApiHash || !appSettings.tgSessionString) {
@@ -237,8 +242,11 @@ async function startTgClient() {
 
     const stringSession = new StringSession(appSettings.tgSessionString);
     tgClient = new TelegramClient(stringSession, parseInt(appSettings.tgApiId), appSettings.tgApiHash, {
-      connectionRetries: 5,
+      connectionRetries: 10,
+      autoReconnect: true,
       useWSS: true,
+      // @ts-ignore
+      keepAliveInterval: 30,
       deviceModel: "Desktop",
       systemVersion: "Windows 10",
       appVersion: "1.0.0",
@@ -344,11 +352,10 @@ async function startTgClient() {
     
     // Background polling fallback as requested for maximum reliability
     if (targetEntity && targetId) {
-        // Polling interval increased to 5 seconds. Polling every 1 second causes Telegram 'FloodWait' errors 
-        // which completely block WebSockets queue and induce 10-25 seconds delays.
-        let pollInterval = setInterval(async () => {
+        // Polling interval decreased to 3 seconds for faster detection
+        pollInterval = setInterval(async () => {
             if (!appSettings.isRunning || !tgClient) {
-                clearInterval(pollInterval);
+                if (pollInterval) clearInterval(pollInterval);
                 return;
             }
             try {
@@ -363,8 +370,19 @@ async function startTgClient() {
             } catch (e) {
                 // ignore
             }
-        }, 5000);
+        }, 3000);
     }
+
+    aliveCheckInterval = setInterval(async () => {
+      if (!appSettings.isRunning) {
+        if (aliveCheckInterval) clearInterval(aliveCheckInterval);
+        return;
+      }
+      if (tgClient && !tgClient.connected) {
+        addLog("⚠️ WebSocket died according to internal state, reconnecting...");
+        await startTgClient();
+      }
+    }, 60000);
 
   } catch (err: any) {
     addLog(`Telegram Client Error: ${err.message}`);
@@ -374,6 +392,9 @@ async function startTgClient() {
 }
 
 async function stopTgClient() {
+  if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+  if (aliveCheckInterval) { clearInterval(aliveCheckInterval); aliveCheckInterval = null; }
+  
   if (tgClient) {
     try {
       await tgClient.disconnect();
@@ -623,10 +644,12 @@ async function executeMexcTrade(eventDetails?: { matchedKeyword: string, message
     return;
   }
 
-  // Execute for all configured accounts
-  for (const account of appSettings.mexcAccounts) {
-    executeTradeForAccount(account, eventDetails);
-  }
+    // Execute for all configured accounts
+    try {
+      await Promise.allSettled(appSettings.mexcAccounts.map(account => executeTradeForAccount(account, eventDetails)));
+    } catch (e: any) {
+      addLog(`Mexc trades error: ${e.message}`);
+    }
 }
 
 async function startServer() {

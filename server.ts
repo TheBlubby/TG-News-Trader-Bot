@@ -264,9 +264,9 @@ async function startTgClient() {
     
     if (targetEntity) {
         try {
-            const initialMessages = await tgClient.getMessages(targetEntity, { limit: 1 });
-            if (initialMessages && initialMessages.length > 0) {
-                lastProcessedMsgId = initialMessages[0].id;
+            const messages = await tgClient.getMessages(targetEntity.id, { limit: 1 });
+            if (messages && messages.length > 0) {
+                lastProcessedMsgId = messages[0].id;
                 addLog(`[DEBUG] Initial message ID for fallback polling set to: ${lastProcessedMsgId}`);
             }
         } catch (e: any) {
@@ -304,6 +304,22 @@ async function startTgClient() {
       const receiveTimeMs = Date.now();
       const message = event.message;
       
+      const targetId = targetEntity ? targetEntity.id : undefined;
+      
+      // Fast manual channel filter (bypasses gramjs internal dialog resolving which is slow)
+      if (appSettings.telegramTargetChannel && targetId) {
+          const peerId = message.peerId;
+          const chatId = peerId ? (peerId.channelId || peerId.chatId || peerId.userId) : null;
+          if (!chatId) return;
+          
+          let chatIdStr = chatId.toString().replace("-100", "");
+          let targetEntityIdStr = targetId.toString().replace("-100", "");
+          
+          if (chatIdStr !== targetEntityIdStr) {
+              return; 
+          }
+      }
+
       if (message.id <= lastProcessedMsgId) {
           // You could allow edited if same ID, but for now we process it so we don't miss delayed text
           if (event.className === "UpdateEditChannelMessage" || event.className === "UpdateEditMessage") {
@@ -318,15 +334,14 @@ async function startTgClient() {
       await processMessage(message, receiveTimeMs, "Event");
     };
 
-    const eventOptions = targetEntity ? { chats: [targetEntity] } : {};
-    
-    tgClient.addEventHandler(handleTelegramEvent, new NewMessage(eventOptions));
-    tgClient.addEventHandler(handleTelegramEvent, new EditedMessage(eventOptions));
+    // Do NOT pass chats filters to NewMessage! GramJS will try to fetch the entity again or filter slowly.
+    tgClient.addEventHandler(handleTelegramEvent, new NewMessage({}));
+    tgClient.addEventHandler(handleTelegramEvent, new EditedMessage({}));
     
     addLog(`Ear listening on socket for: ${appSettings.telegramTargetChannel} with ~0ms delay.`);
     
     // Background polling fallback as requested for maximum reliability
-    if (targetEntity) {
+    if (targetEntity && targetId) {
         // Polling interval increased to 5 seconds. Polling every 1 second causes Telegram 'FloodWait' errors 
         // which completely block WebSockets queue and induce 10-25 seconds delays.
         let pollInterval = setInterval(async () => {
@@ -335,7 +350,7 @@ async function startTgClient() {
                 return;
             }
             try {
-                const messages = await tgClient.getMessages(targetEntity, { limit: 1 });
+                const messages = await tgClient.getMessages(targetId, { limit: 1 });
                 if (messages && messages.length > 0) {
                     const msg = messages[0];
                     if (msg.id > lastProcessedMsgId) {
@@ -346,7 +361,7 @@ async function startTgClient() {
             } catch (e) {
                 // ignore
             }
-        }, 1000);
+        }, 5000);
     }
 
   } catch (err: any) {

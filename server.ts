@@ -303,6 +303,7 @@ async function startTgClient() {
     const handleTelegramEvent = async (event: any) => {
       const receiveTimeMs = Date.now();
       const message = event.message;
+      
       if (message.id <= lastProcessedMsgId) {
           // You could allow edited if same ID, but for now we process it so we don't miss delayed text
           if (event.className === "UpdateEditChannelMessage" || event.className === "UpdateEditMessage") {
@@ -326,6 +327,8 @@ async function startTgClient() {
     
     // Background polling fallback as requested for maximum reliability
     if (targetEntity) {
+        // Polling interval increased to 5 seconds. Polling every 1 second causes Telegram 'FloodWait' errors 
+        // which completely block WebSockets queue and induce 10-25 seconds delays.
         let pollInterval = setInterval(async () => {
             if (!appSettings.isRunning || !tgClient) {
                 clearInterval(pollInterval);
